@@ -1,3 +1,18 @@
+// At the top where you make the NVIDIA NIM API call
+const response = await axios.post(NVIDIA_NIM_ENDPOINT, {
+  model: req.body.model,
+  messages: req.body.messages,
+  temperature: req.body.temperature,
+  max_tokens: req.body.max_tokens,
+  // ... other params
+}, {
+  timeout: 120000, // 2 minutes timeout
+  headers: {
+    'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+    'Content-Type': 'application/json'
+  }
+});
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
