@@ -84,18 +84,24 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy error:', error.message);
-    
-    res.status(error.response?.status || 500).json({
-      error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
-    });
-  }
-});
+  console.error('Proxy error details:', {
+    message: error.message,
+    status: error.response?.status,
+    statusText: error.response?.statusText,
+    data: error.response?.data,
+    headers: error.response?.headers,
+    timeout: error.code === 'ECONNABORTED',
+    timestamp: new Date().toISOString()
+  });
 
+  res.status(error.response?.status || 500).json({
+    error: {
+      message: error.message || 'Internal server error',
+      type: 'invalid_request_error',
+      code: error.response?.status || 500
+    }
+  });
+}
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
