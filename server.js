@@ -112,7 +112,7 @@ app.get('/test-nvidia', async (req, res) => {
       messages: [{role: 'user', content: 'Hi'}],
       max_tokens: 50
     }, {
-      timeout: 120000,
+      timeout: 180000,
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
