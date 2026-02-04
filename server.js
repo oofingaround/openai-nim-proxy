@@ -49,7 +49,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     };
     
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      timeout: 120000, // 2 minutes timeout - THIS IS THE NEW PART
+      timeout: 180000, 
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
