@@ -1,22 +1,6 @@
-// At the top where you make the NVIDIA NIM API call
-const response = await axios.post(NVIDIA_NIM_ENDPOINT, {
-  model: req.body.model,
-  messages: req.body.messages,
-  temperature: req.body.temperature,
-  max_tokens: req.body.max_tokens,
-  // ... other params
-}, {
-  timeout: 120000, // 2 minutes timeout
-  headers: {
-    'Authorization': `Bearer ${NVIDIA_API_KEY}`,
-    'Content-Type': 'application/json'
-  }
-});
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -65,6 +49,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     };
     
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+      timeout: 120000, // 2 minutes timeout - THIS IS THE NEW PART
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
@@ -99,24 +84,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-  console.error('Proxy error details:', {
-    message: error.message,
-    status: error.response?.status,
-    statusText: error.response?.statusText,
-    data: error.response?.data,
-    headers: error.response?.headers,
-    timeout: error.code === 'ECONNABORTED',
-    timestamp: new Date().toISOString()
-  });
+    console.error('Proxy error details:', {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      headers: error.response?.headers,
+      timeout: error.code === 'ECONNABORTED',
+      timestamp: new Date().toISOString()
+    });
+    
+    res.status(error.response?.status || 500).json({
+      error: {
+        message: error.message || 'Internal server error',
+        type: 'invalid_request_error',
+        code: error.response?.status || 500
+      }
+    });
+  }
+});
 
-  res.status(error.response?.status || 500).json({
-    error: {
-      message: error.message || 'Internal server error',
-      type: 'invalid_request_error',
-      code: error.response?.status || 500
-    }
-  });
-}
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
