@@ -104,6 +104,31 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+app.get('/test-nvidia', async (req, res) => {
+  try {
+    const start = Date.now();
+    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, {
+      model: 'deepseek-ai/deepseek-v3.2',
+      messages: [{role: 'user', content: 'Hi'}],
+      max_tokens: 50
+    }, {
+      timeout: 120000,
+      headers: {
+        'Authorization': `Bearer ${NIM_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const duration = Date.now() - start;
+    res.json({ success: true, duration: `${duration}ms`, data: response.data });
+  } catch (error) {
+    res.json({ 
+      success: false, 
+      error: error.message,
+      details: error.response?.data 
+    });
+  }
+});
+
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
