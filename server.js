@@ -17,7 +17,9 @@ app.use(express.json());
 
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  console.log('Headers:', req.headers);
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+  }
   next();
 });
 
@@ -49,21 +51,30 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.post('/v1/chat/completions', async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
+    
+    console.log('Request details:', {
+      model,
+      messageCount: messages?.length,
+      stream,
+      maxTokens: max_tokens
+    });
     
     const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING['gpt-3.5-turbo'];
     
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.7,
+      temperature: temperature || 0.8,
       max_tokens: max_tokens || 4096,
       stream: stream || false
     };
     
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      timeout: 180000, 
+      timeout: 180000,
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
@@ -72,11 +83,29 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     
     if (stream) {
-      res.setHeader('Content-Type', 'text/plain');
+      // Set SSE headers for streaming
+      res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      response.data.pipe(res);
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      
+      // Pipe the stream directly
+      response.data.on('data', (chunk) => {
+        res.write(chunk);
+      });
+      
+      response.data.on('end', () => {
+        res.end();
+        console.log('Stream completed in', Date.now() - startTime, 'ms');
+      });
+      
+      response.data.on('error', (error) => {
+        console.error('Stream error:', error);
+        res.end();
+      });
+      
     } else {
+      // Non-streaming response
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -98,23 +127,23 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy error details:', {
-      message: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      headers: error.response?.headers,
-      timeout: error.code === 'ECONNABORTED',
-      timestamp: new Date().toISOString()
-    });
+    const duration = Date.now() - startTime;
+    console.error('=== ERROR ===');
+    console.error('Duration:', duration, 'ms');
+    console.error('Message:', error.message);
+    console.error('Code:', error.code);
+    console.error('Status:', error.response?.status);
+    console.error('Data:', error.response?.data);
     
-    res.status(error.response?.status || 500).json({
-      error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
-    });
+    if (!res.headersSent) {
+      res.status(error.response?.status || 500).json({
+        error: {
+          message: error.message || 'Internal server error',
+          type: 'invalid_request_error',
+          code: error.response?.status || 500
+        }
+      });
+    }
   }
 });
 
