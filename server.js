@@ -95,10 +95,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.6,
+      temperature: temperature || 0.8,
       max_tokens: max_tokens || 9024,
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: stream || false
+      stream: stream || true
     };
     
     // Make request to NVIDIA NIM API
@@ -110,6 +110,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       responseType: stream ? 'stream' : 'json'
     });
     
+const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+  headers: {
+    'Authorization': `Bearer ${NIM_API_KEY}`,
+    'Content-Type': 'application/json'
+  },
+  responseType: stream ? 'stream' : 'json',
+  timeout: 120000 // 120 seconds
+});
+
     if (stream) {
       // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
