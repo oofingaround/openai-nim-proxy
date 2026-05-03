@@ -48,69 +48,80 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
 
-    // Smart model selection with fallback
+    // Model selection with fallback
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
-      try {
-        const testRes = await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500,
-          timeout: 10000
-        });
-        if (testRes.status >= 200 && testRes.status < 300) nimModel = model;
-      } catch (e) {}
-
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
-        } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
-        }
+      const modelLower = model.toLowerCase();
+      if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
+        nimModel = 'meta/llama-3.1-405b-instruct';
+      } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
+        nimModel = 'meta/llama-3.1-70b-instruct';
+      } else {
+        nimModel = 'meta/llama-3.1-8b-instruct';
       }
     }
 
-    // Always force stream: true to avoid Render's 30s timeout
-    const useStream = true;
+    console.log(`Request: ${model} -> ${nimModel}`);
 
-    const nimRequest = {
-      model: nimModel,
-      messages: messages,
-      temperature: temperature || 0.8,
-      max_tokens: max_tokens || 9024,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: useStream
-    };
-
-    // ✅ Single axios call with timeout
-    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      responseType: 'stream',
-      timeout: 120000
-    });
-
-    // Always handle as stream
+    // ✅ Set SSE headers immediately so Render doesn't timeout waiting for headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering on Render
+    res.flushHeaders(); // Send headers to client RIGHT NOW
 
+    // ✅ Heartbeat: send a comment every 15s to keep the connection alive
+    // SSE comments (": ping") are ignored by clients but prevent timeout
+    const heartbeat = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 15000);
+
+    const nimRequest = {
+      model: nimModel,
+      messages,
+      temperature: temperature || 0.8,
+      max_tokens: max_tokens || 4096, // Reduced from 9024 — less to generate = faster
+      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      stream: true // Always stream from NIM
+    };
+
+    let nimResponse;
+    try {
+      nimResponse = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+        headers: {
+          'Authorization': `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'stream',
+        timeout: 300000 // 5 min — heartbeat keeps client alive, so this can be generous
+      });
+    } catch (err) {
+      clearInterval(heartbeat);
+      console.error('NIM request failed:', err.message, 'Code:', err.code);
+      // Send error as an SSE data event so the client gets something
+      const errPayload = {
+        id: `chatcmpl-err-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{
+          index: 0,
+          delta: { content: `\n\n[Proxy error: ${err.message}]` },
+          finish_reason: 'stop'
+        }]
+      };
+      res.write(`data: ${JSON.stringify(errPayload)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
+    const clientWantsStream = stream === true;
+    let collectedContent = '';
     let buffer = '';
     let reasoningStarted = false;
 
-    // If the original client didn't want streaming, collect and send as JSON at the end
-    const clientWantsStream = stream === true;
-    let collectedContent = '';
-
-    response.data.on('data', (chunk) => {
+    nimResponse.data.on('data', (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -119,6 +130,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!line.startsWith('data: ')) return;
 
         if (line.includes('[DONE]')) {
+          clearInterval(heartbeat);
           if (clientWantsStream) {
             res.write('data: [DONE]\n\n');
           }
@@ -161,20 +173,20 @@ app.post('/v1/chat/completions', async (req, res) => {
             }
           }
         } catch (e) {
-          if (clientWantsStream) res.write(line + '\n');
+          // Malformed chunk — skip it
         }
       });
     });
 
-    response.data.on('end', () => {
+    nimResponse.data.on('end', () => {
+      clearInterval(heartbeat);
       if (!clientWantsStream) {
-        // Send collected response as standard JSON
         res.setHeader('Content-Type', 'application/json');
         res.json({
           id: `chatcmpl-${Date.now()}`,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
-          model: model,
+          model,
           choices: [{
             index: 0,
             message: { role: 'assistant', content: collectedContent },
@@ -187,44 +199,38 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
-    response.data.on('error', (err) => {
-      console.error('Stream error:', err);
+    nimResponse.data.on('error', (err) => {
+      clearInterval(heartbeat);
+      console.error('Stream error:', err.message);
       res.end();
     });
 
   } catch (error) {
     console.error('Proxy error:', error.message);
-    console.error('Status:', error.response?.status);
-    console.error('Timeout?', error.code === 'ECONNABORTED');
-
-    res.status(error.response?.status || 500).json({
-      error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
-    });
+    if (!res.headersSent) {
+      res.status(error.response?.status || 500).json({
+        error: {
+          message: error.message || 'Internal server error',
+          type: 'invalid_request_error',
+          code: error.response?.status || 500
+        }
+      });
+    }
   }
 });
 
 app.all('*', (req, res) => {
   res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
+    error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 }
   });
 });
 
-// Keep Render instance warm
+// Keep Render instance warm — prevents cold starts on your side
 setInterval(() => {
   axios.get(`http://localhost:${PORT}/health`).catch(() => {});
 }, 25000);
 
 app.listen(PORT, () => {
-  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Proxy running on port ${PORT}`);
+  console.log(`Reasoning: ${SHOW_REASONING ? 'ON' : 'OFF'} | Thinking: ${ENABLE_THINKING_MODE ? 'ON' : 'OFF'}`);
 });
