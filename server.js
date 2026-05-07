@@ -1,3 +1,4 @@
+// server.js - OpenAI to NVIDIA NIM API Proxy
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -5,15 +6,8 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ Explicit CORS — handles preflight properly
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'api-key'],
-  credentials: false
-}));
-app.options('*', cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(cors());
+app.use(express.json());
 
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
@@ -32,107 +26,91 @@ const MODEL_MAPPING = {
 };
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'OpenAI to NVIDIA NIM Proxy' });
+  res.json({
+    status: 'ok',
+    service: 'OpenAI to NVIDIA NIM Proxy',
+    reasoning_display: SHOW_REASONING,
+    thinking_mode: ENABLE_THINKING_MODE
+  });
 });
 
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
-    id: model, object: 'model', created: Date.now(), owned_by: 'nvidia-nim-proxy'
+    id: model,
+    object: 'model',
+    created: Date.now(),
+    owned_by: 'nvidia-nim-proxy'
   }));
   res.json({ object: 'list', data: models });
 });
 
 app.post('/v1/chat/completions', async (req, res) => {
-  // ✅ Log everything so you can see what Janitor AI is actually sending
-  console.log('=== Incoming Request ===');
-  console.log('Model:', req.body.model);
-  console.log('Stream:', req.body.stream);
-  console.log('Messages:', req.body.messages?.length);
-  console.log('Origin:', req.headers.origin);
-  console.log('Auth header present:', !!req.headers.authorization);
-
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    const clientWantsStream = stream === true;
 
+    // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
-      const modelLower = (model || '').toLowerCase();
-      if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-        nimModel = 'meta/llama-3.1-405b-instruct';
-      } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-        nimModel = 'meta/llama-3.1-70b-instruct';
-      } else {
-        nimModel = 'meta/llama-3.1-8b-instruct';
+      try {
+        const testRes = await axios.post(`${NIM_API_BASE}/chat/completions`, {
+          model: model,
+          messages: [{ role: 'user', content: 'test' }],
+          max_tokens: 1
+        }, {
+          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+          validateStatus: (status) => status < 500,
+          timeout: 10000
+        });
+        if (testRes.status >= 200 && testRes.status < 300) nimModel = model;
+      } catch (e) {}
+
+      if (!nimModel) {
+        const modelLower = model.toLowerCase();
+        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
+          nimModel = 'meta/llama-3.1-405b-instruct';
+        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
+          nimModel = 'meta/llama-3.1-70b-instruct';
+        } else {
+          nimModel = 'meta/llama-3.1-8b-instruct';
+        }
       }
     }
 
-    console.log(`Routing: ${model} -> ${nimModel}`);
-
-    // ✅ Set headers without flushing yet for non-streaming clients
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    if (clientWantsStream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.flushHeaders(); // Only flush early for SSE — keeps connection alive during NIM wait
-    }
-
-    // ✅ Start heartbeat only for streaming clients
-    let heartbeat;
-    if (clientWantsStream) {
-      heartbeat = setInterval(() => res.write(': ping\n\n'), 15000);
-    }
+    // Always force stream: true to avoid Render's 30s timeout
+    const useStream = true;
 
     const nimRequest = {
       model: nimModel,
-      messages,
+      messages: messages,
       temperature: temperature || 0.8,
-      max_tokens: max_tokens || 4096,
+      max_tokens: max_tokens || 9024,
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: true
+      stream: useStream
     };
 
-    let nimResponse;
-    try {
-      nimResponse = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-        headers: {
-          'Authorization': `Bearer ${NIM_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        responseType: 'stream',
-        timeout: 300000
-      });
-    } catch (err) {
-      if (heartbeat) clearInterval(heartbeat);
-      console.error('NIM request failed:', err.message, '| Status:', err.response?.status, '| Code:', err.code);
+    // ✅ Single axios call with timeout
+    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+      headers: {
+        'Authorization': `Bearer ${NIM_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      responseType: 'stream',
+      timeout: 120000
+    });
 
-      const errorMsg = `[Proxy error: ${err.message}]`;
-      if (clientWantsStream) {
-        const errChunk = {
-          id: `chatcmpl-err-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model,
-          choices: [{ index: 0, delta: { content: errorMsg }, finish_reason: 'stop' }]
-        };
-        res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
-      } else {
-        res.status(err.response?.status || 500).json({
-          error: { message: err.message, type: 'proxy_error', code: err.response?.status || 500 }
-        });
-      }
-      return;
-    }
+    // Always handle as stream
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
 
-    let collectedContent = '';
     let buffer = '';
     let reasoningStarted = false;
 
-    nimResponse.data.on('data', (chunk) => {
+    // If the original client didn't want streaming, collect and send as JSON at the end
+    const clientWantsStream = stream === true;
+    let collectedContent = '';
+
+    response.data.on('data', (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -141,8 +119,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!line.startsWith('data: ')) return;
 
         if (line.includes('[DONE]')) {
-          if (heartbeat) clearInterval(heartbeat);
-          if (clientWantsStream) res.write('data: [DONE]\n\n');
+          if (clientWantsStream) {
+            res.write('data: [DONE]\n\n');
+          }
           return;
         }
 
@@ -153,12 +132,23 @@ app.post('/v1/chat/completions', async (req, res) => {
             const content = data.choices[0].delta.content;
 
             if (SHOW_REASONING) {
-              let combined = '';
-              if (reasoning && !reasoningStarted) { combined = '<think>\n' + reasoning; reasoningStarted = true; }
-              else if (reasoning) { combined = reasoning; }
-              if (content && reasoningStarted) { combined += '</think>\n\n' + content; reasoningStarted = false; }
-              else if (content) { combined += content; }
-              if (combined) { data.choices[0].delta.content = combined; delete data.choices[0].delta.reasoning_content; }
+              let combinedContent = '';
+              if (reasoning && !reasoningStarted) {
+                combinedContent = '<think>\n' + reasoning;
+                reasoningStarted = true;
+              } else if (reasoning) {
+                combinedContent = reasoning;
+              }
+              if (content && reasoningStarted) {
+                combinedContent += '</think>\n\n' + content;
+                reasoningStarted = false;
+              } else if (content) {
+                combinedContent += content;
+              }
+              if (combinedContent) {
+                data.choices[0].delta.content = combinedContent;
+                delete data.choices[0].delta.reasoning_content;
+              }
             } else {
               data.choices[0].delta.content = content || '';
               delete data.choices[0].delta.reasoning_content;
@@ -170,18 +160,21 @@ app.post('/v1/chat/completions', async (req, res) => {
               collectedContent += data.choices[0].delta.content || '';
             }
           }
-        } catch (e) { /* skip malformed chunk */ }
+        } catch (e) {
+          if (clientWantsStream) res.write(line + '\n');
+        }
       });
     });
 
-    nimResponse.data.on('end', () => {
-      if (heartbeat) clearInterval(heartbeat);
+    response.data.on('end', () => {
       if (!clientWantsStream) {
+        // Send collected response as standard JSON
+        res.setHeader('Content-Type', 'application/json');
         res.json({
           id: `chatcmpl-${Date.now()}`,
           object: 'chat.completion',
           created: Math.floor(Date.now() / 1000),
-          model,
+          model: model,
           choices: [{
             index: 0,
             message: { role: 'assistant', content: collectedContent },
@@ -194,30 +187,44 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
-    nimResponse.data.on('error', (err) => {
-      if (heartbeat) clearInterval(heartbeat);
-      console.error('Stream error:', err.message);
+    response.data.on('error', (err) => {
+      console.error('Stream error:', err);
       res.end();
     });
 
   } catch (error) {
-    console.error('Unhandled proxy error:', error.message);
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: { message: error.message, type: 'invalid_request_error', code: 500 }
-      });
-    }
+    console.error('Proxy error:', error.message);
+    console.error('Status:', error.response?.status);
+    console.error('Timeout?', error.code === 'ECONNABORTED');
+
+    res.status(error.response?.status || 500).json({
+      error: {
+        message: error.message || 'Internal server error',
+        type: 'invalid_request_error',
+        code: error.response?.status || 500
+      }
+    });
   }
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
+  res.status(404).json({
+    error: {
+      message: `Endpoint ${req.path} not found`,
+      type: 'invalid_request_error',
+      code: 404
+    }
+  });
 });
 
+// Keep Render instance warm
 setInterval(() => {
   axios.get(`http://localhost:${PORT}/health`).catch(() => {});
 }, 25000);
 
 app.listen(PORT, () => {
-  console.log(`Proxy running on port ${PORT}`);
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
