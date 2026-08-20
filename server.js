@@ -14,16 +14,16 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = false;
-const ENABLE_THINKING_MODE = false;
+const ENABLE_THINKING_MODE = true;
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo':  'z-ai/glm-5.2',
-  'gpt-4':          'deepseek-ai/deepseek-v4-pro',
+  'gpt-4':          'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-4-turbo':    'moonshotai/kimi-k2.6',
-  'gpt-4o':         'deepseek-ai/deepseek-v3.1',
+  'gpt-4o':         'deepseek-ai/deepseek-v4-pro',
   'claude-3-opus':  'openai/gpt-oss-120b',
   'claude-3-sonnet':'openai/gpt-oss-20b',
   'gemini-pro':     'qwen/qwen3-next-80b-a3b-thinking'
+  'glm-5.2':        'z-ai/glm-5.2',
 };
 
 app.get('/health', (req, res) => {
