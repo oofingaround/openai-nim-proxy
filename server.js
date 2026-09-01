@@ -3,7 +3,7 @@
 // Fixes: auth bypass, startup DDoS, silent stream failures, memory leaks, Express 5 deprecations
 // Consolidated Reasoning Subsystem
 //
-// === REASONING PAYLOAD FIXES (this revision) ===
+// === REASONING PAYLOAD FIXES ===
 // 1. Removed the `extra_body: {...}` wrapper from getReasoningPayload(). That key only means
 //    anything inside the official openai-python/node SDK, where it gets unwrapped client-side
 //    and merged into the outgoing JSON as top-level fields. This proxy uses raw axios, so
@@ -18,11 +18,20 @@
 //    ignored by the backend rather than causing a hard failure, but flagged here so you know
 //    it's unverified if you ever go looking for why something isn't behaving.
 //
-// === REASONING OUTPUT FORMAT FIX (this revision) ===
+// === REASONING OUTPUT FORMAT FIX ===
 // 4. Fixed reasoning leaking into message content for clients that don't parse `<thinking>` tags.
 //    Default behavior is now clean `content` + structured `reasoning`/`reasoning_content` fields.
 //    GoonChat (or any legacy client that expects inline tags) can opt-in by sending the
 //    `x-reasoning-format: inline` header.
+//
+// === THIS REVISION ===
+// 5. polyfill.js is now actually loaded (previously created but never required anywhere).
+// 6. Fallback chain no longer burns through every fallback model on a client-side (4xx) error —
+//    those fail the same way on every model, so we fail fast instead of quintupling latency.
+// 7. Unmapped model aliases now log a warning instead of silently swapping in a different model
+//    with no trace of what happened.
+
+require('./polyfill'); // must run before any dependency that checks for browser globals
 
 const express = require('express');
 const cors = require('cors');
@@ -490,11 +499,21 @@ async function callWithFallback(baseRequest, models, enableThinking, clientReaso
 
     } catch (err) {
       lastError = err;
+      const status = err.response?.status;
       console.warn(
         `[FALLBACK] Model failed: ${model}`,
-        err.response?.status,
+        status,
         err.response?.data?.error?.message || err.message
       );
+
+      // FIX: A 4xx error (other than 429 rate-limit) almost always means the
+      // *request itself* is malformed — bad messages, invalid params, etc.
+      // Every other model in the chain will reject the same payload the same
+      // way, so retrying them just multiplies latency for no benefit. Fail
+      // fast instead and surface the real error immediately.
+      if (status && status >= 400 && status < 500 && status !== 429) {
+        throw err;
+      }
     }
   }
 
@@ -532,7 +551,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream
     } = req.body;
 
-    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+    // FIX: log when a client asks for a model alias we don't recognize,
+    // instead of silently swapping in a different model with no trace.
+    let primaryModel = MODEL_MAPPING[model];
+    if (!primaryModel) {
+      console.warn(`[PROXY] Unmapped model requested: "${model}" — using default fallback (nvidia/llama-3.3-nemotron-super-49b-v1.5)`);
+      primaryModel = 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+    }
     const modelChain = [primaryModel, ...FALLBACK_MODELS];
 
     const baseRequest = {
