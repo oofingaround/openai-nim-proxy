@@ -3,7 +3,7 @@
 // Fixes: auth bypass, startup DDoS, silent stream failures, memory leaks, Express 5 deprecations
 // Consolidated Reasoning Subsystem
 //
-// === REASONING PAYLOAD FIXES ===
+// === REASONING PAYLOAD FIXES (this revision) ===
 // 1. Removed the `extra_body: {...}` wrapper from getReasoningPayload(). That key only means
 //    anything inside the official openai-python/node SDK, where it gets unwrapped client-side
 //    and merged into the outgoing JSON as top-level fields. This proxy uses raw axios, so
@@ -18,20 +18,11 @@
 //    ignored by the backend rather than causing a hard failure, but flagged here so you know
 //    it's unverified if you ever go looking for why something isn't behaving.
 //
-// === REASONING OUTPUT FORMAT FIX ===
+// === REASONING OUTPUT FORMAT FIX (this revision) ===
 // 4. Fixed reasoning leaking into message content for clients that don't parse `<thinking>` tags.
 //    Default behavior is now clean `content` + structured `reasoning`/`reasoning_content` fields.
 //    GoonChat (or any legacy client that expects inline tags) can opt-in by sending the
 //    `x-reasoning-format: inline` header.
-//
-// === THIS REVISION ===
-// 5. polyfill.js is now actually loaded (previously created but never required anywhere).
-// 6. Fallback chain no longer burns through every fallback model on a client-side (4xx) error —
-//    those fail the same way on every model, so we fail fast instead of quintupling latency.
-// 7. Unmapped model aliases now log a warning instead of silently swapping in a different model
-//    with no trace of what happened.
-
-require('./polyfill'); // must run before any dependency that checks for browser globals
 
 const express = require('express');
 const cors = require('cors');
@@ -82,7 +73,7 @@ const MODEL_MAPPING = {
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-3.5': 'qwen/qwen3.5-397b-a17b',
   'gpt-4-turbo': 'moonshotai/kimi-k2.6',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
+  'gpt-4o': 'deepseek-ai/deepseek-v4-pro',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
@@ -499,21 +490,11 @@ async function callWithFallback(baseRequest, models, enableThinking, clientReaso
 
     } catch (err) {
       lastError = err;
-      const status = err.response?.status;
       console.warn(
         `[FALLBACK] Model failed: ${model}`,
-        status,
+        err.response?.status,
         err.response?.data?.error?.message || err.message
       );
-
-      // FIX: A 4xx error (other than 429 rate-limit) almost always means the
-      // *request itself* is malformed — bad messages, invalid params, etc.
-      // Every other model in the chain will reject the same payload the same
-      // way, so retrying them just multiplies latency for no benefit. Fail
-      // fast instead and surface the real error immediately.
-      if (status && status >= 400 && status < 500 && status !== 429) {
-        throw err;
-      }
     }
   }
 
@@ -551,13 +532,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream
     } = req.body;
 
-    // FIX: log when a client asks for a model alias we don't recognize,
-    // instead of silently swapping in a different model with no trace.
-    let primaryModel = MODEL_MAPPING[model];
-    if (!primaryModel) {
-      console.warn(`[PROXY] Unmapped model requested: "${model}" — using default fallback (nvidia/llama-3.3-nemotron-super-49b-v1.5)`);
-      primaryModel = 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-    }
+    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
     const modelChain = [primaryModel, ...FALLBACK_MODELS];
 
     const baseRequest = {
