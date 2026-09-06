@@ -229,7 +229,7 @@ try {
         'stream',
 
       timeout:
-        300000
+        120000
 
     }
 
