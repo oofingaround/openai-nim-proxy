@@ -17,7 +17,7 @@ const ENABLE_THINKING_MODE =
   process.env.ENABLE_THINKING_MODE === 'true';
 
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': DEFAULT_MODEL,
+  'gpt-3.5-turbo': 'deepseek-ai/deepseek-v4.1-flash',
   'gpt-4': DEFAULT_MODEL,
   'gpt-4-turbo': DEFAULT_MODEL,
   'gpt-4o': DEFAULT_MODEL,
