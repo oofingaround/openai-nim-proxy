@@ -6,19 +6,15 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// NVIDIA API 設定
 const NIM_API_BASE = (
   process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1'
 ).replace(/\/+$/, '');
 
 const NIM_API_KEY = process.env.NIM_API_KEY;
+const DEFAULT_MODEL = 'z-ai/glm-5.3';
 
-// 是否啟用模型思考模式；預設關閉
 const ENABLE_THINKING_MODE =
   process.env.ENABLE_THINKING_MODE === 'true';
-
-// 所有模型名稱最終都會使用 GLM-5.3
-const DEFAULT_MODEL = 'z-ai/glm-5.3';
 
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': DEFAULT_MODEL,
@@ -31,7 +27,6 @@ const MODEL_MAPPING = {
   'z-ai/glm-5.3': DEFAULT_MODEL
 };
 
-// CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -46,7 +41,6 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 
-// 基本健康檢查
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -55,7 +49,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// OpenAI 相容模型列表
 app.get('/v1/models', (req, res) => {
   const models = [...new Set([
     DEFAULT_MODEL,
@@ -73,27 +66,21 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// 把上游錯誤回應轉成可讀文字
 async function getErrorDetails(error) {
-  const response = error.response;
+  const data = error.response?.data;
 
-  if (!response) {
-    return error.message || 'Unknown network error';
-  }
-
-  const data = response.data;
-
-  if (data && typeof data === 'object' &&
-      typeof data[Symbol.asyncIterator] === 'function') {
+  if (
+    data &&
+    typeof data === 'object' &&
+    typeof data[Symbol.asyncIterator] === 'function'
+  ) {
     try {
       let body = '';
-
       for await (const chunk of data) {
         body += chunk.toString();
       }
-
       return body || 'Empty error response';
-    } catch (readError) {
+    } catch {
       return 'Unable to read upstream error response';
     }
   }
@@ -103,14 +90,15 @@ async function getErrorDetails(error) {
   }
 
   try {
-    return JSON.stringify(data);
+    return JSON.stringify(data ?? error.message);
   } catch {
-    return String(data || 'Empty error response');
+    return error.message || 'Unknown error';
   }
 }
 
-// 聊天補全 API
 app.post('/v1/chat/completions', async (req, res) => {
+  const startedAt = Date.now();
+
   console.log('\n=== Incoming Request ===');
   console.log('Model:', req.body?.model);
   console.log('Stream:', req.body?.stream);
@@ -122,11 +110,11 @@ app.post('/v1/chat/completions', async (req, res) => {
   );
 
   if (!NIM_API_KEY) {
-    console.error('NIM_API_KEY is missing in environment variables');
+    console.error('NIM_API_KEY is missing');
 
     return res.status(500).json({
       error: {
-        message: 'Server configuration error: NIM_API_KEY is missing',
+        message: 'NIM_API_KEY is missing from server configuration',
         type: 'proxy_error',
         code: 500
       }
@@ -156,19 +144,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
   }
 
-  // 保留傳入的模型名稱供日誌查看；
-  // 實際上統一使用 NVIDIA GLM-5.3
   const requestedModel = model || DEFAULT_MODEL;
-  const nimModel =
-    MODEL_MAPPING[requestedModel] || DEFAULT_MODEL;
-
+  const nimModel = MODEL_MAPPING[requestedModel] || DEFAULT_MODEL;
   const clientWantsStream = stream === true;
 
   console.log(`Routing: ${requestedModel} -> ${nimModel}`);
   console.log('NVIDIA endpoint:', `${NIM_API_BASE}/chat/completions`);
   console.log('Client wants stream:', clientWantsStream);
 
-  // 建立 NVIDIA 請求
   const nimRequest = {
     model: nimModel,
     messages,
@@ -177,33 +160,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     stream: clientWantsStream
   };
 
-  // 僅傳遞有提供的可選參數
-  if (top_p !== undefined) {
-    nimRequest.top_p = top_p;
-  }
-
-  if (stop !== undefined) {
-    nimRequest.stop = stop;
-  }
-
+  if (top_p !== undefined) nimRequest.top_p = top_p;
+  if (stop !== undefined) nimRequest.stop = stop;
   if (frequency_penalty !== undefined) {
     nimRequest.frequency_penalty = frequency_penalty;
   }
-
   if (presence_penalty !== undefined) {
     nimRequest.presence_penalty = presence_penalty;
   }
+  if (seed !== undefined) nimRequest.seed = seed;
 
-  if (seed !== undefined) {
-    nimRequest.seed = seed;
-  }
-
-  // NVIDIA API 使用頂層 chat_template_kwargs，
-  // 不使用原本的 extra_body 包裝
   if (ENABLE_THINKING_MODE) {
-    nimRequest.chat_template_kwargs = {
-      thinking: true
-    };
+    nimRequest.chat_template_kwargs = { thinking: true };
   }
 
   try {
@@ -221,21 +189,35 @@ app.post('/v1/chat/completions', async (req, res) => {
             : 'application/json'
         },
         responseType: clientWantsStream ? 'stream' : 'json',
-        timeout: 600000,
-        validateStatus: (status) => status >= 200 && status < 300
+        timeout: 600000
       }
     );
 
     console.log('NVIDIA response status:', nimResponse.status);
     console.log('NVIDIA request succeeded');
 
-    // 串流模式：將 NVIDIA 的 SSE 資料直接轉發給客戶端
     if (clientWantsStream) {
       res.status(nimResponse.status);
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader(
+        'Content-Type',
+        'text/event-stream; charset=utf-8'
+      );
       res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
+
+      let firstChunkLogged = false;
+
+      nimResponse.data.on('data', () => {
+        if (!firstChunkLogged) {
+          firstChunkLogged = true;
+          console.log(
+            'First NVIDIA stream chunk received after',
+            Date.now() - startedAt,
+            'ms'
+          );
+        }
+      });
 
       nimResponse.data.on('error', (error) => {
         console.error('NVIDIA stream error:', error.message);
@@ -245,8 +227,12 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       });
 
-      req.on('close', () => {
+      // IMPORTANT:
+      // Listen to the response closing, not the request closing.
+      // The request body can finish before the response stream does.
+      res.on('close', () => {
         if (!res.writableEnded && !nimResponse.data.destroyed) {
+          console.log('Client disconnected; stopping NVIDIA stream');
           nimResponse.data.destroy();
         }
       });
@@ -255,8 +241,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       return;
     }
 
-    // 非串流模式：直接回傳 JSON
-    console.log('Returning non-stream JSON response');
+    console.log(
+      'Returning non-stream JSON response after',
+      Date.now() - startedAt,
+      'ms'
+    );
+
     return res.status(nimResponse.status).json(nimResponse.data);
 
   } catch (error) {
@@ -268,12 +258,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     console.error('Status:', error.response?.status ?? 'No HTTP response');
     console.error('Error code:', error.code || 'N/A');
     console.error('Response body:', details);
+    console.error('Elapsed:', Date.now() - startedAt, 'ms');
     console.error('=============================');
 
     if (res.headersSent) {
-      if (!res.writableEnded) {
-        res.end();
-      }
+      if (!res.writableEnded) res.end();
       return;
     }
 
@@ -288,7 +277,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// 未匹配的路由
 app.use((req, res) => {
   res.status(404).json({
     error: {
@@ -299,7 +287,6 @@ app.use((req, res) => {
   });
 });
 
-// 啟動服務
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Proxy server listening on port ${PORT}`);
   console.log(`NVIDIA API base: ${NIM_API_BASE}`);
@@ -307,12 +294,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE}`);
 });
 
-// 定期喚醒服務，避免閒置
+// Keep-alive
 setInterval(() => {
   axios
-    .get(`http://localhost:${PORT}/health`, {
-      timeout: 10000
-    })
+    .get(`http://localhost:${PORT}/health`, { timeout: 10000 })
     .catch((error) => {
       console.error('Keep-alive check failed:', error.message);
     });
