@@ -112,7 +112,7 @@ if (!nimModel) {
     modelLower.includes('405b')
   ) {
 
-    nimModel = 'meta/llama-3.1-405b-instruct';
+    nimModel = 'z-ai/glm-5.3';
 
   } else if (
 
@@ -122,11 +122,11 @@ if (!nimModel) {
 
   ) {
 
-    nimModel = 'meta/llama-3.1-70b-instruct';
+    nimModel = 'z-ai/glm-5.3';
 
   } else {
 
-    nimModel = 'meta/llama-3.1-8b-instruct';
+    nimModel = 'z-ai/glm-5.3';
 
   }
 
