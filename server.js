@@ -18,8 +18,8 @@ const ENABLE_THINKING_MODE =
 
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'deepseek-ai/deepseek-v4.1-flash',
-  'gpt-4': DEFAULT_MODEL,
-  'gpt-4-turbo': DEFAULT_MODEL,
+  'gpt-4': 'z-ai/glm-5.3-flash',
+  'gpt-4-turbo': 'mistralai/mistral-large-4-1t-a52b',
   'gpt-4o': DEFAULT_MODEL,
   'claude-3-opus': DEFAULT_MODEL,
   'claude-3-sonnet': DEFAULT_MODEL,
